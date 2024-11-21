@@ -48,7 +48,10 @@
 //! assert_eq!(received, None);
 //! ```
 
-use event_listener::Event;
+mod notify;
+
+pub(crate) use notify::NotifyOnce;
+
 use std::{
     cell::Cell,
     mem::MaybeUninit,
@@ -90,18 +93,18 @@ pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
 struct Chan<T> {
     tx: Once,
     rx: Once,
-    notify: Event,
+    notify: NotifyOnce,
     sender_rc: AtomicUsize,
     data: Cell<MaybeUninit<T>>,
 }
 
 impl<T> Chan<T> {
-    const fn new(sender_rc: usize) -> Self {
+    fn new(sender_rc: usize) -> Self {
         Self {
             data: Cell::new(MaybeUninit::uninit()),
             tx: Once::new(),
             rx: Once::new(),
-            notify: Event::new(),
+            notify: NotifyOnce::new(),
             sender_rc: AtomicUsize::new(sender_rc),
         }
     }
@@ -118,7 +121,7 @@ impl<T> Chan<T> {
         });
         match data {
             None => {
-                self.notify.notify(1);
+                self.notify.notify();
                 Ok(())
             }
             Some(data) => Err(data),
@@ -219,7 +222,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.chan.sender_rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.chan.notify.notify(1);
+            self.chan.notify.notify();
         }
     }
 }
@@ -253,7 +256,11 @@ impl<T> Receiver<T> {
         if self.chan.is_set() || self.chan.is_dropped() {
             return self.chan.take();
         }
-        let listener = self.chan.notify.listen();
+        let listener = self
+            .chan
+            .notify
+            .listen()
+            .expect("two receivers not possible");
         // re-check that we didn't miss the notification before listener was setup
         if self.chan.is_set() || self.chan.is_dropped() {
             return self.chan.take();
