@@ -2,6 +2,9 @@
 name = "async-oneshot-channel"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/AmitPr/async-oneshot-channel"
+description = "A simple async oneshot channel implementation"
+license = "MIT"
 
 [dependencies]
 event-listener = "5"
@@ -9,3 +12,4 @@ event-listener = "5"
 
 [dev-dependencies]
 tokio = { version = "1.41.1", features = ["full"] }
+futures = "0.3.31"

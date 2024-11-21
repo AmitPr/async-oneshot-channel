@@ -1,3 +1,53 @@
+//! A simple (<100 lines of logic) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner.
+//!
+//! This crate provides a oneshot channel that allows sending a single value from one
+//! producer to one consumer. The handle to the sender can be cloned, but only one send
+//! operation succeeds. Supports tasks running on different threads.
+//!
+//! See [`crate::oneshot`] for more details.
+//!
+//! # Examples
+//!
+//! Basic usage:
+//! ```rust
+//! # use futures::executor::block_on;
+//! use async_oneshot_channel::oneshot;
+//! let (tx, rx) = oneshot();
+//! let result = tx.send(42);
+//! assert!(result.is_ok());
+//!
+//! let received = block_on(rx.recv());
+//! assert_eq!(received, Some(42));
+//! ```
+//!
+//! Multiple senders (only one succeeds):
+//! ```rust
+//! # use futures::executor::block_on;
+//! # use async_oneshot_channel::oneshot;
+//! let (tx1, rx) = oneshot();
+//! let tx2 = tx1.clone();
+//!
+//! // First send succeeds
+//! assert!(tx1.send(1).is_ok());
+//! // Second send fails and returns the value
+//! assert_eq!(tx2.send(2), Err(2));
+//!
+//! let received = block_on(rx.recv());
+//! assert_eq!(received, Some(1));
+//! ```
+//!
+//! Handling sender drop:
+//! ```rust
+//! # use futures::executor::block_on;
+//! # use async_oneshot_channel::oneshot;
+//! let (tx, rx) = oneshot::<()>();
+//! drop(tx);
+//!
+//! // Receiver gets None when all senders are dropped without sending
+//! let received = block_on(rx.recv());
+//! assert_eq!(received, None);
+//! ```
+
 use event_listener::Event;
 use std::{
     cell::Cell,
@@ -8,6 +58,30 @@ use std::{
     },
 };
 
+/// Creates a new oneshot channel pair of sender and receiver.
+///
+/// The channel allows for multiple senders (through cloning) but only one send
+/// operation will succeed. The first sender to successfully call `send` will
+/// transfer the value, and all subsequent sends will fail, returning the input value.
+///
+/// # Examples
+///
+/// ```rust
+/// # use futures::executor::block_on;
+/// # use async_oneshot_channel::oneshot;
+/// let (tx, rx) = oneshot();
+///
+/// // Send a value
+/// tx.send(42).unwrap();
+///
+/// // Receive the value
+/// assert_eq!(block_on(rx.recv()), Some(42));
+///
+/// // A second send will fail
+/// assert_eq!(tx.send(43), Err(43));
+/// // A second receive will return None
+/// assert_eq!(block_on(rx.recv()), None);
+/// ```
 pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
     let chan = Arc::new(Chan::new(1));
     (Sender { chan: chan.clone() }, Receiver { chan })
@@ -32,6 +106,11 @@ impl<T> Chan<T> {
         }
     }
 
+    /// Attempts to store a value in the channel.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the value was successfully stored
+    /// - `Err(T)` if a value has already been stored, returning the provided value
     fn set(&self, data: T) -> Result<(), T> {
         let mut data = Some(data);
         self.tx.call_once(|| {
@@ -46,6 +125,15 @@ impl<T> Chan<T> {
         }
     }
 
+    /// Attempts to take the stored value from the channel.
+    ///
+    /// # Returns
+    /// - `Some(T)` if a value was successfully retrieved
+    /// - `None` if no value is available or the value was already taken
+    ///
+    /// # Safety
+    /// This function assumes that the value stored in `data` is valid if `tx` has
+    /// completed, but `rx` has not.
     fn take(&self) -> Option<T> {
         if self.rx.is_completed() || !self.tx.is_completed() {
             return None;
@@ -60,10 +148,12 @@ impl<T> Chan<T> {
         data.map(|data| unsafe { data.assume_init() })
     }
 
+    /// Returns true if a value has been stored in the channel.
     fn is_set(&self) -> bool {
         self.tx.is_completed()
     }
 
+    /// Returns true if all senders have been dropped.
     fn is_dropped(&self) -> bool {
         self.sender_rc.load(Ordering::Acquire) == 0
     }
@@ -72,15 +162,46 @@ impl<T> Chan<T> {
 unsafe impl<T: Send + Sync> Sync for Chan<T> {}
 unsafe impl<T: Send> Send for Chan<T> {}
 
+/// The sending half of the oneshot channel.
+///
+/// Multiple `Sender`s may exist (through cloning), but only one send operation
+/// will succeed. Senders can be freely cloned and sent between threads.
+///
+/// See [`crate::oneshot`] for more details.
 pub struct Sender<T> {
     chan: Arc<Chan<T>>,
 }
 
+/// The receiving half of the oneshot channel.
+///
+/// Only one receiver exists for each channel, and it can only successfully
+/// receive one value.
+///
+/// See [`crate::oneshot`] for more details.
 pub struct Receiver<T> {
     chan: Arc<Chan<T>>,
 }
 
 impl<T> Sender<T> {
+    /// Attempts to send a value through the channel.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the value was successfully sent
+    /// - `Err(T)` if the channel already contains a value/has been used,
+    ///   returning ownership of the input value
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use async_oneshot_channel::oneshot;
+    /// let (tx, rx) = oneshot();
+    ///
+    /// // First send succeeds
+    /// assert!(tx.send(1).is_ok());
+    ///
+    /// // Second send fails
+    /// assert_eq!(tx.send(2), Err(2));
+    /// ```
     pub fn send(&self, data: T) -> Result<(), T> {
         self.chan.set(data)
     }
@@ -104,6 +225,29 @@ impl<T> Drop for Sender<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Asynchronously receives a value from the channel.
+    ///
+    /// # Returns
+    /// - `Some(T)` if a value was successfully received
+    /// - `None` if all senders were dropped without sending a value or if
+    ///   the value was already received
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use futures::executor::block_on;
+    /// # use async_oneshot_channel::oneshot;
+    /// let (tx, rx) = oneshot();
+    ///
+    /// // Send a value
+    /// tx.send(42).unwrap();
+    ///
+    /// // Receive the value
+    /// assert_eq!(block_on(rx.recv()), Some(42));
+    ///
+    /// // Second receive returns None
+    /// assert_eq!(block_on(rx.recv()), None);
+    /// ```
     pub async fn recv(&self) -> Option<T> {
         // fast path, don't setup the listener
         if self.chan.is_set() || self.chan.is_dropped() {
