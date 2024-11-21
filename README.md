@@ -1,5 +1,12 @@
 # async-oneshot-channel
 
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](
+https://github.com/AmitPr/async-oneshot-channel)
+[![Cargo](https://img.shields.io/crates/v/async-oneshot-channel.svg)](
+https://crates.io/crates/async-oneshot-channel)
+[![Documentation](https://docs.rs/async-oneshot-channel/badge.svg)](
+https://docs.rs/async-oneshot-channel)
+
 A simple (<100 lines of logic) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner. This implementation supports cloned senders while ensuring only one send operation will succeed.
 
 ## Usage
