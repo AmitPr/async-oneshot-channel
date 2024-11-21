@@ -7,8 +7,6 @@ description = "A simple async oneshot channel implementation"
 license = "MIT"
 
 [dependencies]
-event-listener = "5"
-
 
 [dev-dependencies]
 tokio = { version = "1.41.1", features = ["full"] }

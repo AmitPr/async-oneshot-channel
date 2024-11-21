@@ -7,7 +7,7 @@ https://crates.io/crates/async-oneshot-channel)
 [![Documentation](https://docs.rs/async-oneshot-channel/badge.svg)](
 https://docs.rs/async-oneshot-channel)
 
-A simple (<100 lines of logic) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner. This implementation supports cloned senders while ensuring only one send operation will succeed.
+A simple (<150 LoC, dependency-free) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe and async-runtime-agnostic manner. This implementation supports cloned senders while ensuring only one send operation will succeed.
 
 ## Usage
 

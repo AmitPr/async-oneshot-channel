@@ -1,10 +1,10 @@
-//! A simple (<100 lines of logic) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner.
+//! A simple (<150 LoC, dependency-free) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner and async-runtime-agnostic manner.
 //!
 //! This crate provides a oneshot channel that allows sending a single value from one
 //! producer to one consumer. The handle to the sender can be cloned, but only one send
 //! operation succeeds. Supports tasks running on different threads.
 //!
-//! See [`crate::oneshot`] for more details.
+//! See [`oneshot`] for more details.
 //!
 //! # Examples
 //!
@@ -48,17 +48,16 @@
 //! assert_eq!(received, None);
 //! ```
 
-mod notify;
-
-pub(crate) use notify::NotifyOnce;
-
 use std::{
     cell::Cell,
+    future::Future,
     mem::MaybeUninit,
+    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Once,
     },
+    task::{Context, Poll, Waker},
 };
 
 /// Creates a new oneshot channel pair of sender and receiver.
@@ -86,26 +85,26 @@ use std::{
 /// assert_eq!(block_on(rx.recv()), None);
 /// ```
 pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
-    let chan = Arc::new(Chan::new(1));
+    let chan = Arc::new(Chan::new());
     (Sender { chan: chan.clone() }, Receiver { chan })
 }
 
 struct Chan<T> {
     tx: Once,
     rx: Once,
-    notify: NotifyOnce,
     sender_rc: AtomicUsize,
     data: Cell<MaybeUninit<T>>,
+    waker: Cell<Option<Waker>>,
 }
 
 impl<T> Chan<T> {
-    fn new(sender_rc: usize) -> Self {
+    const fn new() -> Self {
         Self {
-            data: Cell::new(MaybeUninit::uninit()),
             tx: Once::new(),
             rx: Once::new(),
-            notify: NotifyOnce::new(),
-            sender_rc: AtomicUsize::new(sender_rc),
+            sender_rc: AtomicUsize::new(1),
+            data: Cell::new(MaybeUninit::uninit()),
+            waker: Cell::new(None),
         }
     }
 
@@ -121,7 +120,10 @@ impl<T> Chan<T> {
         });
         match data {
             None => {
-                self.notify.notify();
+                self.waker
+                    .take()
+                    .expect("waker not set on first send")
+                    .wake();
                 Ok(())
             }
             Some(data) => Err(data),
@@ -170,7 +172,7 @@ unsafe impl<T: Send> Send for Chan<T> {}
 /// Multiple `Sender`s may exist (through cloning), but only one send operation
 /// will succeed. Senders can be freely cloned and sent between threads.
 ///
-/// See [`crate::oneshot`] for more details.
+/// See [`oneshot`] for more details.
 pub struct Sender<T> {
     chan: Arc<Chan<T>>,
 }
@@ -180,7 +182,7 @@ pub struct Sender<T> {
 /// Only one receiver exists for each channel, and it can only successfully
 /// receive one value.
 ///
-/// See [`crate::oneshot`] for more details.
+/// See [`oneshot`] for more details.
 pub struct Receiver<T> {
     chan: Arc<Chan<T>>,
 }
@@ -222,7 +224,38 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.chan.sender_rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.chan.notify.notify();
+            if let Some(waker) = self.chan.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+/// Future returned by [`oneshot`](oneshot). When awaited, resolves
+/// to the value sent through the channel, or `None` if either:
+/// - all senders were dropped without sending a value
+/// - the value was already received
+///
+/// See [`Receiver::recv`](Receiver::recv) and [`oneshot`] for more details.
+pub struct Recv<T> {
+    chan: Arc<Chan<T>>,
+}
+
+impl<T> Future for Recv<T> {
+    type Output = Option<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // fast path
+        if self.chan.is_set() || self.chan.is_dropped() {
+            return Poll::Ready(self.chan.take());
+        }
+
+        self.chan.waker.set(Some(cx.waker().clone()));
+
+        if self.chan.is_set() || self.chan.is_dropped() {
+            Poll::Ready(self.chan.take())
+        } else {
+            Poll::Pending
         }
     }
 }
@@ -251,24 +284,10 @@ impl<T> Receiver<T> {
     /// // Second receive returns None
     /// assert_eq!(block_on(rx.recv()), None);
     /// ```
-    pub async fn recv(&self) -> Option<T> {
-        // fast path, don't setup the listener
-        if self.chan.is_set() || self.chan.is_dropped() {
-            return self.chan.take();
+    pub fn recv(&self) -> Recv<T> {
+        Recv {
+            chan: self.chan.clone(),
         }
-        let listener = self
-            .chan
-            .notify
-            .listen()
-            .expect("two receivers not possible");
-        // re-check that we didn't miss the notification before listener was setup
-        if self.chan.is_set() || self.chan.is_dropped() {
-            return self.chan.take();
-        }
-
-        listener.await;
-
-        self.chan.take()
     }
 }
 
