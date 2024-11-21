@@ -1,0 +1,11 @@
+[package]
+name = "async-oneshot-channel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+event-listener = "5"
+
+
+[dev-dependencies]
+tokio = { version = "1.41.1", features = ["full"] }
