@@ -51,7 +51,6 @@
 use std::{
     cell::Cell,
     future::Future,
-    mem::MaybeUninit,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -91,9 +90,8 @@ pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
 
 struct Chan<T> {
     tx: Once,
-    rx: Once,
     sender_rc: AtomicUsize,
-    data: Cell<MaybeUninit<T>>,
+    data: Cell<Option<T>>,
     waker: Cell<Option<Waker>>,
 }
 
@@ -101,9 +99,8 @@ impl<T> Chan<T> {
     const fn new() -> Self {
         Self {
             tx: Once::new(),
-            rx: Once::new(),
             sender_rc: AtomicUsize::new(1),
-            data: Cell::new(MaybeUninit::uninit()),
+            data: Cell::new(None),
             waker: Cell::new(None),
         }
     }
@@ -116,14 +113,13 @@ impl<T> Chan<T> {
     fn set(&self, data: T) -> Result<(), T> {
         let mut data = Some(data);
         self.tx.call_once(|| {
-            self.data.replace(MaybeUninit::new(data.take().unwrap()));
+            self.data.set(data.take());
         });
         match data {
             None => {
-                self.waker
-                    .take()
-                    .expect("waker not set on first send")
-                    .wake();
+                if let Some(waker) = self.waker.take() {
+                    waker.wake();
+                }
                 Ok(())
             }
             Some(data) => Err(data),
@@ -140,17 +136,11 @@ impl<T> Chan<T> {
     /// This function assumes that the value stored in `data` is valid if `tx` has
     /// completed, but `rx` has not.
     fn take(&self) -> Option<T> {
-        if self.rx.is_completed() || !self.tx.is_completed() {
+        if !self.tx.is_completed() {
             return None;
         }
 
-        let mut data = None;
-        self.rx.call_once(|| {
-            data = Some(self.data.replace(MaybeUninit::uninit()));
-        });
-
-        // SAFETY: `data` is only `Some` once, due to `self.rx`
-        data.map(|data| unsafe { data.assume_init() })
+        self.data.take()
     }
 
     /// Returns true if a value has been stored in the channel.
@@ -214,7 +204,7 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.chan.sender_rc.fetch_add(1, Ordering::Relaxed);
+        self.chan.sender_rc.fetch_add(1, Ordering::Release);
         Self {
             chan: self.chan.clone(),
         }
