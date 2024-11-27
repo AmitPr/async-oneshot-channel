@@ -54,7 +54,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Once,
+        Arc, Once, OnceLock,
     },
     task::{Context, Poll, Waker},
 };
@@ -92,7 +92,7 @@ struct Chan<T> {
     tx: Once,
     sender_rc: AtomicUsize,
     data: Cell<Option<T>>,
-    waker: Cell<Option<Waker>>,
+    waker: OnceLock<Waker>,
 }
 
 impl<T> Chan<T> {
@@ -101,7 +101,7 @@ impl<T> Chan<T> {
             tx: Once::new(),
             sender_rc: AtomicUsize::new(1),
             data: Cell::new(None),
-            waker: Cell::new(None),
+            waker: OnceLock::new(),
         }
     }
 
@@ -117,8 +117,8 @@ impl<T> Chan<T> {
         });
         match data {
             None => {
-                if let Some(waker) = self.waker.take() {
-                    waker.wake();
+                if let Some(waker) = self.waker.get() {
+                    waker.wake_by_ref();
                 }
                 Ok(())
             }
@@ -155,7 +155,6 @@ impl<T> Chan<T> {
 }
 
 unsafe impl<T: Send + Sync> Sync for Chan<T> {}
-unsafe impl<T: Send> Send for Chan<T> {}
 
 /// The sending half of the oneshot channel.
 ///
@@ -214,8 +213,8 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.chan.sender_rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(waker) = self.chan.waker.take() {
-                waker.wake();
+            if let Some(waker) = self.chan.waker.get() {
+                waker.wake_by_ref();
             }
         }
     }
@@ -240,7 +239,8 @@ impl<T> Future for Recv<T> {
             return Poll::Ready(self.chan.take());
         }
 
-        self.chan.waker.set(Some(cx.waker().clone()));
+        // Only need to set waker on first poll
+        self.chan.waker.get_or_init(|| cx.waker().clone());
 
         if self.chan.is_set() || self.chan.is_dropped() {
             Poll::Ready(self.chan.take())
@@ -527,5 +527,18 @@ mod tests {
         assert_eq!(data, Some(42));
         let data = rx.recv().await;
         assert_eq!(data, None);
+    }
+
+    #[test]
+    fn trait_compiles() {
+        fn test_send<T: Send>() {}
+        fn test_sync<T: Sync>() {}
+
+        test_send::<Sender<i32>>();
+        test_send::<Receiver<i32>>();
+        test_sync::<Sender<i32>>();
+        test_sync::<Receiver<i32>>();
+        test_send::<Chan<i32>>();
+        test_sync::<Chan<i32>>();
     }
 }
