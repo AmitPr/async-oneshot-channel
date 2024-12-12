@@ -1,6 +1,6 @@
 [package]
 name = "async-oneshot-channel"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 repository = "https://github.com/AmitPr/async-oneshot-channel"
 description = "A simple async oneshot channel implementation"
