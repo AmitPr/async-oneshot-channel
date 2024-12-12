@@ -7,6 +7,7 @@ description = "A simple async oneshot channel implementation"
 license = "MIT"
 
 [dependencies]
+atomic-waker = "1.1.2"
 
 [dev-dependencies]
 tokio = { version = "1.41.1", features = ["full"] }

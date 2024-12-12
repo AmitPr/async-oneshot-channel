@@ -54,10 +54,12 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Once, RwLock,
+        Arc, Once,
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
+
+use atomic_waker::AtomicWaker;
 
 /// Creates a new oneshot channel pair of sender and receiver.
 ///
@@ -92,7 +94,7 @@ struct Chan<T> {
     tx: Once,
     sender_rc: AtomicUsize,
     data: Cell<Option<T>>,
-    waker: RwLock<Option<Waker>>,
+    waker: AtomicWaker,
 }
 
 impl<T> Chan<T> {
@@ -101,7 +103,7 @@ impl<T> Chan<T> {
             tx: Once::new(),
             sender_rc: AtomicUsize::new(1),
             data: Cell::new(None),
-            waker: RwLock::new(None),
+            waker: AtomicWaker::new(),
         }
     }
 
@@ -117,9 +119,7 @@ impl<T> Chan<T> {
         });
         match data {
             None => {
-                if let Some(waker) = self.waker.read().unwrap().as_ref() {
-                    waker.wake_by_ref();
-                }
+                self.waker.wake();
                 Ok(())
             }
             Some(data) => Err(data),
@@ -154,7 +154,7 @@ impl<T> Chan<T> {
     }
 }
 
-unsafe impl<T: Send + Sync> Sync for Chan<T> {}
+// unsafe impl<T: Send + Sync> Sync for Chan<T> {}
 
 /// The sending half of the oneshot channel.
 ///
@@ -213,9 +213,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.chan.sender_rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(waker) = self.chan.waker.read().unwrap().as_ref() {
-                waker.wake_by_ref();
-            }
+            self.chan.waker.wake();
         }
     }
 }
@@ -240,8 +238,7 @@ impl<T> Future for Recv<T> {
             return Poll::Ready(self.chan.take());
         }
 
-        let mut write = self.chan.waker.write().unwrap();
-        write.replace(cx.waker().clone());
+        self.chan.waker.register(cx.waker());
 
         if self.chan.is_set() || self.chan.is_dropped() {
             Poll::Ready(self.chan.take())
@@ -253,7 +250,7 @@ impl<T> Future for Recv<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.chan.waker.write().unwrap().take();
+        self.chan.waker.take();
     }
 }
 
