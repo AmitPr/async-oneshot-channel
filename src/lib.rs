@@ -54,7 +54,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Once, OnceLock,
+        Arc, Once, RwLock,
     },
     task::{Context, Poll, Waker},
 };
@@ -92,7 +92,7 @@ struct Chan<T> {
     tx: Once,
     sender_rc: AtomicUsize,
     data: Cell<Option<T>>,
-    waker: OnceLock<Waker>,
+    waker: RwLock<Option<Waker>>,
 }
 
 impl<T> Chan<T> {
@@ -101,7 +101,7 @@ impl<T> Chan<T> {
             tx: Once::new(),
             sender_rc: AtomicUsize::new(1),
             data: Cell::new(None),
-            waker: OnceLock::new(),
+            waker: RwLock::new(None),
         }
     }
 
@@ -117,7 +117,7 @@ impl<T> Chan<T> {
         });
         match data {
             None => {
-                if let Some(waker) = self.waker.get() {
+                if let Some(waker) = self.waker.read().unwrap().as_ref() {
                     waker.wake_by_ref();
                 }
                 Ok(())
@@ -213,7 +213,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if self.chan.sender_rc.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(waker) = self.chan.waker.get() {
+            if let Some(waker) = self.chan.waker.read().unwrap().as_ref() {
                 waker.wake_by_ref();
             }
         }
@@ -236,17 +236,24 @@ impl<T> Future for Recv<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // fast path
         if self.chan.is_set() || self.chan.is_dropped() {
+            // if is_dropped or is_set, the Waker can never be triggered again
             return Poll::Ready(self.chan.take());
         }
 
-        // Only need to set waker on first poll
-        self.chan.waker.get_or_init(|| cx.waker().clone());
+        let mut write = self.chan.waker.write().unwrap();
+        write.replace(cx.waker().clone());
 
         if self.chan.is_set() || self.chan.is_dropped() {
             Poll::Ready(self.chan.take())
         } else {
             Poll::Pending
         }
+    }
+}
+
+impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        self.chan.waker.write().unwrap().take();
     }
 }
 
