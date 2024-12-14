@@ -48,18 +48,22 @@
 //! assert_eq!(received, None);
 //! ```
 
+pub(crate) mod sync {
+    pub(crate) use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+}
+
 use std::{
-    cell::Cell,
     future::Future,
     pin::Pin,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Once,
-    },
     task::{Context, Poll},
 };
+use sync::{Arc, AtomicUsize, Ordering};
 
 use atomic_waker::AtomicWaker;
+use take_once::TakeOnce;
 
 /// Creates a new oneshot channel pair of sender and receiver.
 ///
@@ -91,18 +95,16 @@ pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
 }
 
 struct Chan<T> {
-    tx: Once,
     sender_rc: AtomicUsize,
-    data: Cell<Option<T>>,
+    data: TakeOnce<T>,
     waker: AtomicWaker,
 }
 
 impl<T> Chan<T> {
     const fn new() -> Self {
         Self {
-            tx: Once::new(),
             sender_rc: AtomicUsize::new(1),
-            data: Cell::new(None),
+            data: TakeOnce::new(),
             waker: AtomicWaker::new(),
         }
     }
@@ -113,17 +115,10 @@ impl<T> Chan<T> {
     /// - `Ok(())` if the value was successfully stored
     /// - `Err(T)` if a value has already been stored, returning the provided value
     fn set(&self, data: T) -> Result<(), T> {
-        let mut data = Some(data);
-        self.tx.call_once(|| {
-            self.data.set(data.take());
-        });
-        match data {
-            None => {
-                self.waker.wake();
-                Ok(())
-            }
-            Some(data) => Err(data),
-        }
+        self.data.store(data)?;
+        self.waker.wake();
+
+        Ok(())
     }
 
     /// Attempts to take the stored value from the channel.
@@ -136,16 +131,12 @@ impl<T> Chan<T> {
     /// This function assumes that the value stored in `data` is valid if `tx` has
     /// completed, but `rx` has not.
     fn take(&self) -> Option<T> {
-        if !self.tx.is_completed() {
-            return None;
-        }
-
         self.data.take()
     }
 
     /// Returns true if a value has been stored in the channel.
     fn is_set(&self) -> bool {
-        self.tx.is_completed()
+        self.data.is_completed()
     }
 
     /// Returns true if all senders have been dropped.
@@ -153,8 +144,6 @@ impl<T> Chan<T> {
         self.sender_rc.load(Ordering::Acquire) == 0
     }
 }
-
-// unsafe impl<T: Send + Sync> Sync for Chan<T> {}
 
 /// The sending half of the oneshot channel.
 ///
