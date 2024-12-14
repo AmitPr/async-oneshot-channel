@@ -19,7 +19,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 
 [[package]]
 name = "async-oneshot-channel"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "atomic-waker",
  "futures",
@@ -346,9 +346,9 @@ dependencies = [
 
 [[package]]
 name = "take-once"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be7de6461ceff8a9d0cde374f29640e2253a723a019e428d103f1abe63574a09"
+checksum = "ae3e30fcd6e30346aff75e3bd38834ebc8ca2ed8925884bc867f77213bf3f714"
 
 [[package]]
 name = "tokio"

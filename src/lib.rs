@@ -94,6 +94,7 @@ pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
     (Sender { chan: chan.clone() }, Receiver { chan })
 }
 
+#[derive(Debug)]
 struct Chan<T> {
     sender_rc: AtomicUsize,
     data: TakeOnce<T>,
@@ -133,6 +134,7 @@ impl<T> Chan<T> {
 /// will succeed. Senders can be freely cloned and sent between threads.
 ///
 /// See [`oneshot`] for more details.
+#[derive(Debug)]
 pub struct Sender<T> {
     chan: Arc<Chan<T>>,
 }
@@ -143,6 +145,7 @@ pub struct Sender<T> {
 /// receive one value.
 ///
 /// See [`oneshot`] for more details.
+#[derive(Debug)]
 pub struct Receiver<T> {
     chan: Arc<Chan<T>>,
 }
@@ -203,6 +206,7 @@ impl<T> Drop for Sender<T> {
 /// - the value was already received
 ///
 /// See [`Receiver::recv`](Receiver::recv) and [`oneshot`] for more details.
+#[derive(Debug)]
 pub struct Recv<T> {
     chan: Arc<Chan<T>>,
 }
@@ -264,7 +268,7 @@ impl<T> Receiver<T> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct WeakSender<T> {
     chan: Weak<Chan<T>>,
 }
