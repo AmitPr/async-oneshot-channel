@@ -1,4 +1,4 @@
-//! A simple (<150 LoC, dependency-free) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner and async-runtime-agnostic manner.
+//! A simple (<100 LoC) "oneshot" channel for asynchronously sending a single value between tasks, in a thread-safe manner and async-runtime-agnostic manner.
 //!
 //! This crate provides a oneshot channel that allows sending a single value from one
 //! producer to one consumer. The handle to the sender can be cloned, but only one send
@@ -49,9 +49,9 @@
 //! ```
 
 pub(crate) mod sync {
-    pub(crate) use std::sync::{
+    pub use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Weak,
     };
 }
 
@@ -60,7 +60,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use sync::{Arc, AtomicUsize, Ordering};
+use sync::{Arc, AtomicUsize, Ordering, Weak};
 
 use atomic_waker::AtomicWaker;
 use take_once::TakeOnce;
@@ -109,7 +109,7 @@ impl<T> Chan<T> {
         }
     }
 
-    /// Attempts to store a value in the channel.
+    /// Attempts to store a value in the channel, waking the receiver.
     ///
     /// # Returns
     /// - `Ok(())` if the value was successfully stored
@@ -119,24 +119,6 @@ impl<T> Chan<T> {
         self.waker.wake();
 
         Ok(())
-    }
-
-    /// Attempts to take the stored value from the channel.
-    ///
-    /// # Returns
-    /// - `Some(T)` if a value was successfully retrieved
-    /// - `None` if no value is available or the value was already taken
-    ///
-    /// # Safety
-    /// This function assumes that the value stored in `data` is valid if `tx` has
-    /// completed, but `rx` has not.
-    fn take(&self) -> Option<T> {
-        self.data.take()
-    }
-
-    /// Returns true if a value has been stored in the channel.
-    fn is_set(&self) -> bool {
-        self.data.is_completed()
     }
 
     /// Returns true if all senders have been dropped.
@@ -188,6 +170,14 @@ impl<T> Sender<T> {
     pub fn send(&self, data: T) -> Result<(), T> {
         self.chan.set(data)
     }
+
+    /// Downgrades the sender to hold a weak reference to the channel.
+    /// The resultant [`WeakSender`] is not reference-counted by the channel
+    pub fn downgrade(&self) -> WeakSender<T> {
+        WeakSender {
+            chan: Arc::downgrade(&self.chan),
+        }
+    }
 }
 
 impl<T> Clone for Sender<T> {
@@ -222,15 +212,15 @@ impl<T> Future for Recv<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // fast path
-        if self.chan.is_set() || self.chan.is_dropped() {
-            // if is_dropped or is_set, the Waker can never be triggered again
-            return Poll::Ready(self.chan.take());
+        if self.chan.data.is_completed() || self.chan.is_dropped() {
+            // the Waker can never be triggered again
+            return Poll::Ready(self.chan.data.take());
         }
 
         self.chan.waker.register(cx.waker());
 
-        if self.chan.is_set() || self.chan.is_dropped() {
-            Poll::Ready(self.chan.take())
+        if self.chan.data.is_completed() || self.chan.is_dropped() {
+            Poll::Ready(self.chan.data.take())
         } else {
             Poll::Pending
         }
@@ -270,6 +260,50 @@ impl<T> Receiver<T> {
     pub fn recv(&self) -> Recv<T> {
         Recv {
             chan: self.chan.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct WeakSender<T> {
+    chan: Weak<Chan<T>>,
+}
+
+impl<T> WeakSender<T> {
+    /// Attempts to send a value through the channel.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the value was successfully sent
+    /// - `Err(T)` if the channel already contains a value/has been used,
+    ///   returning ownership of the input value, or if the channel was dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use async_oneshot_channel::oneshot;
+    /// let (tx, rx) = oneshot();
+    ///
+    /// // First send succeeds
+    /// assert!(tx.send(1).is_ok());
+    ///
+    /// // Second send fails
+    /// assert_eq!(tx.send(2), Err(2));
+    /// ```
+    pub fn send(&self, data: T) -> Result<(), T> {
+        match self.chan.upgrade() {
+            Some(chan) => chan.set(data),
+            None => Err(data),
+        }
+    }
+
+    pub fn upgrade(self) -> Option<Sender<T>> {
+        let chan = self.chan.upgrade()?;
+        if chan.sender_rc.fetch_add(1, Ordering::Acquire) == 0 {
+            // All senders were dropped between the Weak upgrade and this increment.
+            chan.sender_rc.fetch_sub(1, Ordering::AcqRel);
+            None
+        } else {
+            Some(Sender { chan })
         }
     }
 }
@@ -533,5 +567,19 @@ mod tests {
         test_sync::<Receiver<i32>>();
         test_send::<Chan<i32>>();
         test_sync::<Chan<i32>>();
+    }
+
+    #[tokio::test]
+    async fn test_weak_sender() {
+        let (tx, rx) = oneshot();
+        let weak_tx = tx.downgrade();
+        assert!(weak_tx.send(42).is_ok());
+        assert_eq!(rx.recv().await, Some(42));
+
+        assert!(weak_tx.upgrade().is_some());
+
+        let weak_tx = tx.downgrade();
+        drop(tx);
+        assert!(weak_tx.upgrade().is_none());
     }
 }
