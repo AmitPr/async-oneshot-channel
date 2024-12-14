@@ -300,7 +300,7 @@ impl<T> WeakSender<T> {
         }
     }
 
-    pub fn upgrade(self) -> Option<Sender<T>> {
+    pub fn upgrade(&self) -> Option<Sender<T>> {
         let chan = self.chan.upgrade()?;
         if chan.sender_rc.fetch_add(1, Ordering::Acquire) == 0 {
             // All senders were dropped between the Weak upgrade and this increment.
@@ -581,8 +581,6 @@ mod tests {
         assert_eq!(rx.recv().await, Some(42));
 
         assert!(weak_tx.upgrade().is_some());
-
-        let weak_tx = tx.downgrade();
         drop(tx);
         assert!(weak_tx.upgrade().is_none());
     }
