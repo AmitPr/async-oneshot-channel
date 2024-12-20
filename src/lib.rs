@@ -268,7 +268,7 @@ impl<T> Receiver<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WeakSender<T> {
     chan: Weak<Chan<T>>,
 }
@@ -308,6 +308,14 @@ impl<T> WeakSender<T> {
             None
         } else {
             Some(Sender { chan })
+        }
+    }
+}
+
+impl<T> Clone for WeakSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            chan: self.chan.clone(),
         }
     }
 }
